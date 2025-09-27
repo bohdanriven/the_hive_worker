@@ -8,31 +8,35 @@ import zipfile
 import shutil
 import tempfile
 
-# --- ІМПОРТУЄМО НАШІ ЗАВДАННЯ З ПАПКИ TASKS ---
-from tasks.prom_parser import prom_parser_task
-from tasks.system_info import system_info_task
+from config import WORKER_VERSION, SERVER_URL, NO_TASK_SLEEP, TIME_ERROR_SLEEP, TASK_REGISTRY
 
-# --- Конфігурація ---
-SERVER_URL = "http://127.0.0.1:3010"
-NO_TASK_SLEEP = 60  # Час очікування, якщо немає завдань (секунди)
-TIME_ERROR_SLEEP = 60  # Час очікування при помилці з'єднання (секунди)
+def get_or_create_worker_id(config_file="worker.conf"):
+    """
+    Перевіряє наявність ID у файлі конфігурації.
+    Якщо файл існує - читає ID з нього.
+    Якщо ні - генерує новий ID і зберігає у файл.
+    """
+    # Визначаємо шлях до файлу поруч з .exe
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    config_path = os.path.join(base_path, config_file)
 
-# --- РЕЄСТР ЗАВДАНЬ ---
-TASK_REGISTRY = {
-    "prom_pars": prom_parser_task,
-    "get_sys_info": system_info_task,
-}
-
-
-def get_worker_version():
-    """Функція читає версію з файлу version.txt."""
     try:
-        base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        version_file = os.path.join(base_path, "version.txt")
-        with open(version_file, "r") as f:
-            return f.read().strip()
+        # Спроба прочитати існуючий ID
+        with open(config_path, "r") as f:
+            worker_id = f.read().strip()
+            if worker_id:
+                return worker_id
     except FileNotFoundError:
-        return "0.0.0"
+        # Якщо файл не знайдено, генеруємо новий ID
+        new_worker_id = (
+            f"worker_{uuid.uuid4().hex[:8]}"  # Зробимо ID трохи довшим для унікальності
+        )
+
+        # Зберігаємо новий ID у файл
+        with open(config_path, "w") as f:
+            f.write(new_worker_id)
+
+        return new_worker_id
 
 
 def execute_regular_task(task_name: str, params: dict) -> tuple[bool, any]:
@@ -96,7 +100,6 @@ def handle_update(params: dict):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# --- Головний цикл ---
 def main_loop():
     """Головний цикл роботи воркера."""
     # Очищення сміття (старого воркера)
@@ -108,18 +111,18 @@ def main_loop():
         except OSError as e:
             print(f"[CLEANUP_ERROR] Не вдалося видалити старий файл: {e}")
 
-    WORKER_ID = f"worker_{uuid.uuid4().hex[:6]}"
-    WORKER_VERSION = get_worker_version()
+    WORKER_ID = get_or_create_worker_id()
     HEADERS = {"X-Worker-ID": WORKER_ID, "X-Worker-Version": WORKER_VERSION}
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
     print(f"--- Worker {WORKER_ID} | Version {WORKER_VERSION} | Started ---")
     print(f"Connecting to server: {SERVER_URL}")
 
     while True:
         try:
-            response = requests.get(
-                f"{SERVER_URL}/get_task", headers=HEADERS, timeout=10
-            )
+            response = session.get(f"{SERVER_URL}/get_task", timeout=10)
             response.raise_for_status()
             task = response.json()
 
@@ -144,7 +147,7 @@ def main_loop():
                 "status": status,
                 "result": result_data,
             }
-            requests.post(
+            session.post(
                 f"{SERVER_URL}/submit_result", json=result_payload, timeout=60
             ).raise_for_status()
             print(f"Результат завдання '{task_type}' надіслано зі статусом: {status}")
