@@ -9,7 +9,7 @@ setlocal
 
 echo [UPDATER] Starting update process...
 
-:: Отримуємо шляхи до файлів з аргументів командного рядка
+:: Отримуємо шляхи до файлів з аргументів командного рядка.
 set "OLD_EXE=%~1"
 set "NEW_EXE=%~2"
 
