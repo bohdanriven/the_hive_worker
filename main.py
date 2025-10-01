@@ -6,9 +6,15 @@ import os
 import sys
 import zipfile
 import shutil
-import tempfile
 
-from config import WORKER_VERSION, SERVER_URL, NO_TASK_SLEEP, TIME_ERROR_SLEEP, TASK_REGISTRY
+from config import (
+    WORKER_VERSION,
+    SERVER_URL,
+    NO_TASK_SLEEP,
+    TIME_ERROR_SLEEP,
+    TASK_REGISTRY,
+)
+
 
 def get_or_create_worker_id(config_file="worker.conf"):
     """
@@ -52,35 +58,43 @@ def execute_regular_task(task_name: str, params: dict) -> tuple[bool, any]:
 
 
 def handle_update(params: dict):
-    """Обробляє завдання на оновлення, завантажуючи та розпаковуючи .zip архів."""
-    temp_dir = None
+    """
+    Обробляє завдання на оновлення, завантажуючи та розпаковуючи архів
+    в поточній папці воркера, щоб уникнути конфліктів з антивірусом.
+    """
+    # Визначаємо шлях до папки, де запущено .exe файл
+    exe_dir = os.path.dirname(sys.executable)
+
+    # Визначаємо шляхи для архіву та папки розпаковки всередині директорії воркера
+    zip_path = os.path.join(exe_dir, "update.zip")
+    extract_dir = os.path.join(exe_dir, "update_temp")
+
     try:
         url = params.get("url")
         if not url:
             raise ValueError("URL для оновлення не надано.")
 
-        temp_dir = tempfile.mkdtemp(prefix="worker_update_")
-        zip_path = os.path.join(temp_dir, "update.zip")
         print(f"[UPDATE] Завантажую архів в {zip_path}...")
-
         response = requests.get(url, stream=True, timeout=300)
         response.raise_for_status()
         with open(zip_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        print(f"[UPDATE] Розпаковую архів...")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(temp_dir)
+        if not os.path.exists(extract_dir):
+            os.makedirs(extract_dir)
 
-        new_worker_path = os.path.join(temp_dir, "worker.exe")
+        print(f"[UPDATE] Розпаковую архів в {extract_dir}...")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(extract_dir)
+
+        new_worker_path = os.path.join(extract_dir, "worker.exe")
         if not os.path.exists(new_worker_path):
             raise FileNotFoundError("worker.exe не знайдено в архіві.")
 
         current_exe = sys.executable
-        base_dir = os.path.dirname(current_exe)
         update_exe_dest = current_exe.replace(".exe", "_update.exe")
-        updater_bat = os.path.join(base_dir, "updater.bat")
+        updater_bat = os.path.join(exe_dir, "updater.bat")
 
         if not os.path.exists(updater_bat):
             raise FileNotFoundError(f"Скрипт оновлення {updater_bat} не знайдено!")
@@ -90,14 +104,19 @@ def handle_update(params: dict):
         print("[UPDATE] Запускаю лаунчер оновлень і завершую роботу...")
         subprocess.Popen(
             [updater_bat, current_exe, update_exe_dest],
-            creationflags=subprocess.DETACHED_PROCESS,
+            # creationflags=subprocess.DETACHED_PROCESS,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
         sys.exit(0)
     except Exception as e:
         print(f"[UPDATE_ERROR] Не вдалося виконати оновлення: {e}")
     finally:
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        # Прибираємо за собою тимчасові файли (архів та папку)
+        print("[UPDATE] Очищення тимчасових файлів...")
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 def main_loop():
