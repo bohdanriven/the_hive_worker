@@ -1,5 +1,5 @@
 # Версія воркера. Оновлюйте це значення перед кожним новим релізом.
-WORKER_VERSION = "1.0.1"
+WORKER_VERSION = "1.0.0"
 # URL сервера, до якого підключається воркер
 SERVER_URL = "http://45.66.10.118:3010/api"
 
@@ -10,8 +10,8 @@ TIME_ERROR_SLEEP = 60
 
 
 # --- РЕЄСТР ЗАВДАНЬ ---
-from tasks.prom_parser import prom_parser_task
+from tasks.prom_parser import parse_product_data
 
 TASK_REGISTRY = {
-    "prom_pars": prom_parser_task,
+    "prom_pars": parse_product_data,
 }

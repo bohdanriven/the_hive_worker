@@ -1,10 +1,10 @@
-@echo off
-setlocal
-
 :: =================================================================
-:: Updater Script for Worker (v2 - Robust)
+:: Updater Script for Worker
 :: Призначення: Надійно замінює старий .exe файл на новий і перезапускає його.
 :: =================================================================
+
+@echo off
+setlocal
 
 echo [UPDATER] Starting update process...
 
@@ -47,9 +47,4 @@ echo [UPDATER] Old worker deleted successfully.
 echo [UPDATER] Renaming %NEW_EXE_PATH% to %OLD_EXE_FILENAME%
 ren "%NEW_EXE_PATH%" "%OLD_EXE_FILENAME%"
 
-:: Запускаємо оновлений воркер.
-echo [UPDATER] Starting updated worker...
-start "" /D "%~dp1" "%OLD_EXE_PATH%"
-
-echo [UPDATER] Update complete. Exiting.
 endlocal
