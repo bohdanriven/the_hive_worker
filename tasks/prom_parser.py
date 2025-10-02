@@ -1,6 +1,7 @@
 # pars.py
 import re
 import json
+import time
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
@@ -41,10 +42,6 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
     """
     Автономний модуль парсингу.
     Приймає список товарів, обробляє їх і повертає результат у форматі JSON.
-
-    :param products_to_scrape: Список словників, напр. [{'product_id': 1, 'url': '...'}, ...]
-    :param headless_mode: True для запуску у фоновому режимі, False - у видимому.
-    :return: Рядок у форматі JSON зі зібраними даними.
     """
     scraped_data = []
     driver = None
@@ -80,7 +77,6 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
                 "rating": None,
             }
 
-            # 1. Перевірка на статус "Видалений" (ID 4)
             try:
                 driver.find_element(By.CSS_SELECTOR, DELETED_WARNING_PANEL_SELECTOR)
                 daily_data["status_id"] = 4
@@ -89,15 +85,12 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
             except NoSuchElementException:
                 pass
 
-            # 2. Надійний пошук статусу з явним очікуванням
             try:
                 wait = WebDriverWait(driver, 5)
                 status_element = wait.until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, STATUS_SELECTOR))
                 )
                 status_text = status_element.text.lower()
-                print(f"   [parser] 🔎 Знайдено текст статусу: '{status_text}'")
-
                 for text_key, status_id in STATUS_MAP.items():
                     if text_key in status_text:
                         daily_data["status_id"] = status_id
@@ -109,7 +102,6 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
                 except NoSuchElementException:
                     pass
 
-            # 3. Збір інших даних
             try:
                 main_info_block = driver.find_element(
                     By.CSS_SELECTOR, MAIN_INFO_BLOCK_SELECTOR
@@ -142,11 +134,11 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
             except (NoSuchElementException, TypeError, ValueError):
                 pass
 
-            # 4. Резервний статус ID 5 (Помилка сторінки)
             if daily_data.get("status_id") is None:
                 daily_data["status_id"] = 5
 
             scraped_data.append(daily_data)
+            time.sleep(1)  # Пауза в 1 секунду між запитами
 
     except Exception as e:
         print(f"🔥 Критична помилка під час роботи парсера: {e}")
@@ -154,5 +146,4 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
         if driver:
             driver.quit()
 
-    # --- Повертаємо результат у форматі JSON ---
     return json.dumps(scraped_data, indent=4, ensure_ascii=False)

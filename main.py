@@ -13,6 +13,7 @@ from config import (
     NO_TASK_SLEEP,
     TIME_ERROR_SLEEP,
     TASK_REGISTRY,
+    UPDATE_FAIL_SLEEP,
 )
 
 
@@ -57,7 +58,7 @@ def execute_regular_task(task_name: str, params: dict) -> tuple[bool, any]:
         return False, {"error": str(e)}
 
 
-def handle_update(params: dict):
+def handle_update(params: dict) -> bool:
     """
     Обробляє завдання на оновлення, завантажуючи та розпаковуючи архів
     в поточній папці воркера, щоб уникнути конфліктів з антивірусом.
@@ -110,6 +111,7 @@ def handle_update(params: dict):
         sys.exit(0)
     except Exception as e:
         print(f"[UPDATE_ERROR] Не вдалося виконати оновлення: {e}")
+        return False
     finally:
         # Прибираємо за собою тимчасові файли (архів та папку)
         print("[UPDATE] Очищення тимчасових файлів...")
@@ -154,7 +156,14 @@ def main_loop():
             print(f"--> Отримано завдання '{task_type}' (ID: {task.get('id')})")
 
             if task_type == "update_worker":
-                handle_update(params)
+                update_successful = handle_update(params)
+
+                if not update_successful:
+                    print(
+                        f"[MAIN] Помилка оновлення. Таймаут на {UPDATE_FAIL_SLEEP} секунд..."
+                    )
+                    time.sleep(UPDATE_FAIL_SLEEP)
+
                 continue
 
             is_successful, result_data = execute_regular_task(task_type, params)
