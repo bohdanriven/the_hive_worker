@@ -6,6 +6,7 @@ import os
 import sys
 import zipfile
 import shutil
+import json
 
 from config import (
     WORKER_VERSION,
@@ -51,10 +52,25 @@ def execute_regular_task(task_name: str, params: dict) -> tuple[bool, any]:
     try:
         if task_name not in TASK_REGISTRY:
             raise ValueError(f"Завдання '{task_name}' не знайдено в реєстрі.")
-        result = TASK_REGISTRY[task_name](**params)
-        return True, result
+
+        # Викликаємо таску яка має повернути json
+        result_json_string = TASK_REGISTRY[task_name](**params)
+        # Парсимо цей рядок, щоб отримати об'єкт
+        data = json.loads(result_json_string)
+
+        # Перевіряємо статус всередині об'єкта
+        if data.get("status") == "success":
+            # Якщо успіх, повертаємо True і самі дані (список товарів)
+            return True, data.get("data", [])
+        else:
+            # Якщо помилка, повертаємо False і весь об'єкт з повідомленням про помилку
+            print(
+                f"[ERROR] Парсер повернув помилку для завдання '{task_name}': {data.get('message')}"
+            )
+            return False, data
+
     except Exception as e:
-        print(f"[ERROR] Помилка під час виконання завдання '{task_name}': {e}")
+        print(f"[ERROR] Критична помилка під час обробки завдання '{task_name}': {e}")
         return False, {"error": str(e)}
 
 

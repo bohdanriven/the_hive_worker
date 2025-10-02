@@ -50,9 +50,6 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
         # --- Налаштування та запуск Selenium (undetected-chromedriver) ---
         options = uc.ChromeOptions()
         options.add_argument("--headless")
-        options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
-        )
 
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--no-sandbox")
@@ -140,10 +137,19 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
             scraped_data.append(daily_data)
             time.sleep(1)  # Пауза в 1 секунду між запитами
 
+        # Якщо цикл завершився без помилок, готуємо успішну відповідь
+        success_result = {"status": "success", "data": scraped_data}
+        return json.dumps(success_result, indent=4, ensure_ascii=False)
+
     except Exception as e:
-        print(f"🔥 Критична помилка під час роботи парсера: {e}")
+        # У разі будь-якої критичної помилки, формуємо відповідь про помилку
+        error_result = {
+            "status": "error",
+            "message": f"🔥 Критична помилка під час роботи парсера: {str(e)}",
+        }
+        return json.dumps(error_result, indent=4, ensure_ascii=False)
+
     finally:
+        # Блок finally виконається в будь-якому випадку для закриття драйвера
         if driver:
             driver.quit()
-
-    return json.dumps(scraped_data, indent=4, ensure_ascii=False)
