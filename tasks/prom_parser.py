@@ -1,4 +1,3 @@
-# pars.py
 import re
 import json
 import time
@@ -7,6 +6,9 @@ from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service as ChromeService
 
 # --- КОНФІГУРАЦІЯ СЕЛЕКТОРІВ ---
 MAIN_INFO_BLOCK_SELECTOR = "div[data-qaid='main_product_info']"
@@ -38,6 +40,30 @@ def _extract_number(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def create_browser(headless_mode: bool = True):
+    """
+    Допоміжна функція для створення та налаштування нового екземпляра браузера.
+    Автоматично керує версією chromedriver.
+    """
+    options = uc.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--no-sandbox")
+
+    try:
+        # Використовуємо webdriver-manager для автоматичного завантаження
+        # та налаштування відповідного chromedriver
+        service = ChromeService(executable_path=ChromeDriverManager().install())
+        driver = uc.Chrome(service=service, options=options)
+    except Exception as e:
+        print(f"Не вдалося автоматично налаштувати драйвер: {e}")
+        # Спроба запустити в стариий спосіб, якщо webdriver-manager не спрацював
+        driver = uc.Chrome(options=options)
+
+    driver.set_page_load_timeout(300)  # Таймаут на завантаження сторінки
+    return driver
+
+
 def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> str:
     """
     Автономний модуль парсингу.
@@ -47,24 +73,16 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
     driver = None
 
     try:
-        # --- Налаштування та запуск Selenium (undetected-chromedriver) ---
-        options = uc.ChromeOptions()
-        options.add_argument("--headless")
+        # Створення нового екземпляра браузера
+        driver = create_browser(headless_mode)
 
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--no-sandbox")
-
-        driver = uc.Chrome(options=options)
-
-        # --- Основний цикл обробки товарів ---
+        # Основний цикл обробки товарів
         for product in products_to_scrape:
             product_id = product.get("product_id")
             product_url = product.get("url")
 
             if not all([product_id, product_url]):
                 continue
-
-            driver.get(product_url)
 
             daily_data = {
                 "product_id": product_id,
@@ -74,68 +92,94 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
                 "rating": None,
             }
 
-            try:
-                driver.find_element(By.CSS_SELECTOR, DELETED_WARNING_PANEL_SELECTOR)
-                daily_data["status_id"] = 4
-                scraped_data.append(daily_data)
-                continue
-            except NoSuchElementException:
-                pass
-
-            try:
-                wait = WebDriverWait(driver, 5)
-                status_element = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, STATUS_SELECTOR))
-                )
-                status_text = status_element.text.lower()
-                for text_key, status_id in STATUS_MAP.items():
-                    if text_key in status_text:
-                        daily_data["status_id"] = status_id
-                        break
-            except TimeoutException:
+            for attempt in range(2):
                 try:
-                    driver.find_element(By.CSS_SELECTOR, PAGE_NOT_FOUND_SELECTOR)
-                    daily_data["status_id"] = 0
-                except NoSuchElementException:
-                    pass
+                    driver.get(product_url)
 
-            try:
-                main_info_block = driver.find_element(
-                    By.CSS_SELECTOR, MAIN_INFO_BLOCK_SELECTOR
-                )
-                try:
-                    price_element = main_info_block.find_element(
-                        By.CSS_SELECTOR, PRICE_SELECTOR
-                    )
-                    daily_data["price"] = float(
-                        price_element.get_attribute("data-qaprice")
-                    )
-                except (NoSuchElementException, TypeError, ValueError):
-                    pass
+                    # Перевірка на статус "Видалений" (ID 4)
+                    try:
+                        driver.find_element(
+                            By.CSS_SELECTOR, DELETED_WARNING_PANEL_SELECTOR
+                        )
+                        daily_data["status_id"] = 4
+                        break  # Успіх, виходимо з циклу спроб
+                    except NoSuchElementException:
+                        pass
 
-                try:
-                    orders_text = main_info_block.find_element(
-                        By.CSS_SELECTOR, ORDER_COUNTER_SELECTOR
-                    ).text
-                    daily_data["order_quantity"] = _extract_number(orders_text)
-                except NoSuchElementException:
-                    pass
-            except NoSuchElementException:
-                pass
+                    # Пошук статусу з явним очікуванням
+                    try:
+                        wait = WebDriverWait(driver, 5)
+                        status_element = wait.until(
+                            EC.presence_of_element_located(
+                                (By.CSS_SELECTOR, STATUS_SELECTOR)
+                            )
+                        )
+                        status_text = status_element.text
 
-            try:
-                rating_element = driver.find_element(By.CSS_SELECTOR, RATING_SELECTOR)
-                daily_data["rating"] = float(
-                    rating_element.get_attribute("data-qarating")
-                )
-            except (NoSuchElementException, TypeError, ValueError):
-                pass
+                        for text_key, status_id in STATUS_MAP.items():
+                            if text_key in status_text:
+                                daily_data["status_id"] = status_id
+                                break
+                    except TimeoutException:
+                        try:
+                            driver.find_element(
+                                By.CSS_SELECTOR, PAGE_NOT_FOUND_SELECTOR
+                            )
+                            daily_data["status_id"] = 0
+                        except NoSuchElementException:
+                            pass
 
+                    # Збір інших даних
+                    try:
+                        main_info_block = driver.find_element(
+                            By.CSS_SELECTOR, MAIN_INFO_BLOCK_SELECTOR
+                        )
+                        try:
+                            price_element = main_info_block.find_element(
+                                By.CSS_SELECTOR, PRICE_SELECTOR
+                            )
+                            daily_data["price"] = float(
+                                price_element.get_attribute("data-qaprice")
+                            )
+                        except (NoSuchElementException, TypeError, ValueError):
+                            pass
+
+                        try:
+                            orders_text = main_info_block.find_element(
+                                By.CSS_SELECTOR, ORDER_COUNTER_SELECTOR
+                            ).text
+                            daily_data["order_quantity"] = _extract_number(orders_text)
+                        except NoSuchElementException:
+                            pass
+                    except NoSuchElementException:
+                        pass
+
+                    try:
+                        rating_element = driver.find_element(
+                            By.CSS_SELECTOR, RATING_SELECTOR
+                        )
+                        daily_data["rating"] = float(
+                            rating_element.get_attribute("data-qarating")
+                        )
+                    except (NoSuchElementException, TypeError, ValueError):
+                        pass
+
+                    # Якщо ми дійшли до цього місця, значить все пройшло успішно
+                    break  # Виходимо з циклу спроб
+
+                except Exception as e:
+                    if attempt == 0:  # Якщо це була перша невдала спроба
+                        # Перезапуск браузеру
+                        if driver:
+                            driver.quit()
+                        driver = create_browser(headless_mode)
+
+            # Якщо статус не було визначено, ставимо статус 5
             if daily_data.get("status_id") is None:
                 daily_data["status_id"] = 5
 
             scraped_data.append(daily_data)
-            time.sleep(1)  # Пауза в 1 секунду між запитами
+            time.sleep(1)  # Пауза для стабільності
 
         # Якщо цикл завершився без помилок, готуємо успішну відповідь
         success_result = {"status": "success", "data": scraped_data}
