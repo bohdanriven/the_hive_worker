@@ -46,19 +46,27 @@ def create_browser(headless_mode: bool = True):
     Автоматично керує версією chromedriver.
     """
     options = uc.ChromeOptions()
-    options.add_argument("--headless")
+    if headless_mode:
+        options.add_argument("--headless")
+
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
 
+    driver = None
     try:
         # Використовуємо webdriver-manager для автоматичного завантаження
         # та налаштування відповідного chromedriver
         service = ChromeService(executable_path=ChromeDriverManager().install())
         driver = uc.Chrome(service=service, options=options)
     except Exception as e:
-        print(f"Не вдалося автоматично налаштувати драйвер: {e}")
         # Спроба запустити в стариий спосіб, якщо webdriver-manager не спрацював
-        driver = uc.Chrome(options=options)
+        try:
+            # Спроба запустити в старий спосіб, якщо webdriver-manager не спрацював
+            driver = uc.Chrome(options=options)
+        except Exception as e2:
+            # Якщо і це не спрацювало, кидаємо виняток, щоб не отримати None
+            raise RuntimeError("Не вдалося створити екземпляр Chrome драйвера.")
 
     driver.set_page_load_timeout(300)  # Таймаут на завантаження сторінки
     return driver
