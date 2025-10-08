@@ -1,16 +1,15 @@
 import re
 import json
 import time
-import undetected_chromedriver as uc
+from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from webdriver_manager.firefox import GeckoDriverManager
 
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
-
-# --- КОНФІГУРАЦІЯ СЕЛЕКТОРІВ ---
+# --- Селектори ---
 MAIN_INFO_BLOCK_SELECTOR = "div[data-qaid='main_product_info']"
 PRICE_SELECTOR = "div[data-qaid='product_price']"
 STATUS_SELECTOR = "span[data-qaid='product_presence']"
@@ -19,7 +18,7 @@ RATING_SELECTOR = "div[data-qaid='product_rating']"
 PAGE_NOT_FOUND_SELECTOR = "span[data-qaid='page_not_found_title']"
 DELETED_WARNING_PANEL_SELECTOR = "div[data-qaid='warning_panel']"
 
-# --- СЛОВНИК СТАТУСІВ ---
+# --- Статуси ---
 STATUS_MAP = {
     "Недоступний": 0,
     "Недоступен": 0,
@@ -33,62 +32,50 @@ STATUS_MAP = {
 
 
 def _extract_number(text: str) -> int | None:
-    """Допоміжна функція для витягання першого числа з тексту."""
+    """Витягує перше число з тексту."""
     if not text:
         return None
     match = re.search(r"(\d+)", str(text))
     return int(match.group(1)) if match else None
 
 
-def create_browser(headless_mode: bool = True):
-    """
-    Допоміжна функція для створення та налаштування нового екземпляра браузера.
-    Автоматично керує версією chromedriver.
-    """
-    options = uc.ChromeOptions()
-    if headless_mode:
-        options.add_argument("--headless")
+def _create_browser():
+    """Створює та налаштовує екземпляр браузера Firefox в headless-режимі."""
+    options = webdriver.FirefoxOptions()
+    options.add_argument("--headless")
+    options.add_argument("--width=1920")
+    options.add_argument("--height=1080")
 
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-gpu")
+    # Налаштування для маскування від антибот-систем
+    options.set_preference("dom.webdriver.enabled", False)
+    options.set_preference("useAutomationExtension", False)
 
-    driver = None
     try:
-        # Використовуємо webdriver-manager для автоматичного завантаження
-        # та налаштування відповідного chromedriver
-        service = ChromeService(executable_path=ChromeDriverManager().install())
-        driver = uc.Chrome(service=service, options=options)
+        service = FirefoxService(executable_path=GeckoDriverManager().install())
+        driver = webdriver.Firefox(service=service, options=options)
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
     except Exception as e:
-        # Спроба запустити в стариий спосіб, якщо webdriver-manager не спрацював
-        try:
-            # Спроба запустити в старий спосіб, якщо webdriver-manager не спрацював
-            driver = uc.Chrome(options=options)
-        except Exception as e2:
-            # Якщо і це не спрацювало, кидаємо виняток, щоб не отримати None
-            raise RuntimeError("Не вдалося створити екземпляр Chrome драйвера.")
+        raise RuntimeError(f"Не вдалося створити екземпляр Firefox драйвера: {e}")
 
-    driver.set_page_load_timeout(300)  # Таймаут на завантаження сторінки
+    driver.set_page_load_timeout(300)
     return driver
 
 
-def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> str:
+def parse_product_data(products_to_scrape: list) -> str:
     """
-    Автономний модуль парсингу.
+    Основна функція парсингу.
     Приймає список товарів, обробляє їх і повертає результат у форматі JSON.
     """
     scraped_data = []
     driver = None
-
     try:
-        # Створення нового екземпляра браузера
-        driver = create_browser(headless_mode)
+        driver = _create_browser()
 
-        # Основний цикл обробки товарів
         for product in products_to_scrape:
             product_id = product.get("product_id")
             product_url = product.get("url")
-
             if not all([product_id, product_url]):
                 continue
 
@@ -100,30 +87,25 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
                 "rating": None,
             }
 
-            for attempt in range(2):
+            for attempt in range(2):  # Цикл з 2 спробами
                 try:
                     driver.get(product_url)
-
-                    # Перевірка на статус "Видалений" (ID 4)
+                    # --- Логіка збору даних ---
                     try:
                         driver.find_element(
                             By.CSS_SELECTOR, DELETED_WARNING_PANEL_SELECTOR
                         )
                         daily_data["status_id"] = 4
-                        break  # Успіх, виходимо з циклу спроб
+                        break
                     except NoSuchElementException:
                         pass
-
-                    # Пошук статусу з явним очікуванням
                     try:
                         wait = WebDriverWait(driver, 5)
-                        status_element = wait.until(
+                        status_text = wait.until(
                             EC.presence_of_element_located(
                                 (By.CSS_SELECTOR, STATUS_SELECTOR)
                             )
-                        )
-                        status_text = status_element.text
-
+                        ).text
                         for text_key, status_id in STATUS_MAP.items():
                             if text_key in status_text:
                                 daily_data["status_id"] = status_id
@@ -136,24 +118,19 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
                             daily_data["status_id"] = 0
                         except NoSuchElementException:
                             pass
-
-                    # Збір інших даних
                     try:
-                        main_info_block = driver.find_element(
+                        main_block = driver.find_element(
                             By.CSS_SELECTOR, MAIN_INFO_BLOCK_SELECTOR
                         )
                         try:
-                            price_element = main_info_block.find_element(
+                            price_attr = main_block.find_element(
                                 By.CSS_SELECTOR, PRICE_SELECTOR
-                            )
-                            daily_data["price"] = float(
-                                price_element.get_attribute("data-qaprice")
-                            )
+                            ).get_attribute("data-qaprice")
+                            daily_data["price"] = float(price_attr)
                         except (NoSuchElementException, TypeError, ValueError):
                             pass
-
                         try:
-                            orders_text = main_info_block.find_element(
+                            orders_text = main_block.find_element(
                                 By.CSS_SELECTOR, ORDER_COUNTER_SELECTOR
                             ).text
                             daily_data["order_quantity"] = _extract_number(orders_text)
@@ -161,47 +138,37 @@ def parse_product_data(products_to_scrape: list, headless_mode: bool = True) -> 
                             pass
                     except NoSuchElementException:
                         pass
-
                     try:
-                        rating_element = driver.find_element(
+                        rating_attr = driver.find_element(
                             By.CSS_SELECTOR, RATING_SELECTOR
-                        )
-                        daily_data["rating"] = float(
-                            rating_element.get_attribute("data-qarating")
-                        )
+                        ).get_attribute("data-qarating")
+                        daily_data["rating"] = float(rating_attr)
                     except (NoSuchElementException, TypeError, ValueError):
                         pass
 
-                    # Якщо ми дійшли до цього місця, значить все пройшло успішно
-                    break  # Виходимо з циклу спроб
-
-                except Exception as e:
-                    if attempt == 0:  # Якщо це була перша невдала спроба
-                        # Перезапуск браузеру
+                    break  # Вихід з циклу спроб у разі успіху
+                except Exception:
+                    if (
+                        attempt == 0
+                    ):  # Якщо перша спроба невдала, перезапускаємо браузер
                         if driver:
                             driver.quit()
-                        driver = create_browser(headless_mode)
+                        driver = _create_browser()
 
-            # Якщо статус не було визначено, ставимо статус 5
             if daily_data.get("status_id") is None:
-                daily_data["status_id"] = 5
+                daily_data["status_id"] = 5  # Статус "Не вдалося визначити"
 
             scraped_data.append(daily_data)
-            time.sleep(1)  # Пауза для стабільності
+            time.sleep(1)
 
-        # Якщо цикл завершився без помилок, готуємо успішну відповідь
-        success_result = {"status": "success", "data": scraped_data}
-        return json.dumps(success_result, indent=4, ensure_ascii=False)
-
+        return json.dumps(
+            {"status": "success", "data": scraped_data}, ensure_ascii=False
+        )
     except Exception as e:
-        # У разі будь-якої критичної помилки, формуємо відповідь про помилку
-        error_result = {
-            "status": "error",
-            "message": f"🔥 Критична помилка під час роботи парсера: {str(e)}",
-        }
-        return json.dumps(error_result, indent=4, ensure_ascii=False)
-
+        return json.dumps(
+            {"status": "error", "message": f"Критична помилка: {str(e)}"},
+            ensure_ascii=False,
+        )
     finally:
-        # Блок finally виконається в будь-якому випадку для закриття драйвера
         if driver:
             driver.quit()
