@@ -5,3 +5,4 @@ __pycache__/
 
 *.spec
 worker.conf
+workername.txt
