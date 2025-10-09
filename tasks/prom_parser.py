@@ -1,5 +1,8 @@
 import re
 import time
+import tempfile
+import psutil
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
@@ -30,16 +33,35 @@ STATUS_MAP = {
 }
 
 
+# Функція знаходить перше число в тексті
 def _extract_number(text: str) -> int | None:
-    """Повертає перше число з рядка."""
     if not text:
         return None
     match = re.search(r"(\d+)", str(text))
     return int(match.group(1)) if match else None
 
 
+def safe_cleanup_processes():
+    """Безпечно завершує залишкові процеси від попередніх запусків Selenium."""
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            proc_name = proc.info["name"]
+            if proc_name == "chromedriver.exe":
+                proc.kill()
+            elif (
+                proc_name == "chrome.exe"
+                and proc.info["cmdline"]
+                and any(
+                    "--remote-debugging-port" in arg for arg in proc.info["cmdline"]
+                )
+            ):
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+
 def create_browser():
-    """Створює екземпляр Chrome з налаштуваннями проти анти-бот систем."""
+    """Створює екземпляр Chrome з налаштуваннями для тихої та ефективної роботи."""
     options = webdriver.ChromeOptions()
 
     # Налаштування для обходу анти-бот систем
@@ -49,11 +71,19 @@ def create_browser():
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    # Вимкнення завантаження зображень
+    # Налаштування оптимізації
     prefs = {"profile.managed_default_content_settings.images": 2}
     options.add_experimental_option("prefs", prefs)
+    profile_path = tempfile.mkdtemp()
+    options.add_argument(f"--user-data-dir={profile_path}")
 
-    # Основні налаштування запуску
+    # Налаштування для "тихого" режиму
+    options.add_argument("--log-level=3")  # Показувати в логах тільки фатальні помилки
+    options.add_experimental_option(
+        "excludeSwitches", ["enable-logging"]
+    )  # Вимкнути логування DevTools
+
+    # Налаштування запуску
     options.add_argument("--headless")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
@@ -61,7 +91,10 @@ def create_browser():
     options.add_argument("--disable-dev-shm-usage")
 
     try:
-        service = ChromeService(executable_path=ChromeDriverManager().install())
+        # Перенаправляємо вивід логів самого chromedriver.exe в "нікуди"
+        service = ChromeService(
+            executable_path=ChromeDriverManager().install(), log_output=os.devnull
+        )
         driver = webdriver.Chrome(service=service, options=options)
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -77,102 +110,110 @@ def parse_product_data(products_to_scrape: list) -> str:
     """Основна функція для парсингу списку товарів."""
     scraped_data = []
     try:
-        with create_browser() as driver:
-            for product in products_to_scrape:
-                product_id = product.get("product_id")
-                product_url = product.get("url")
+        driver = create_browser()
+        for product in products_to_scrape:
+            product_id = product.get("product_id")
+            product_url = product.get("url")
 
-                if not all([product_id, product_url]):
-                    continue
+            if not all([product_id, product_url]):
+                continue
 
-                daily_data = {
-                    "product_id": product_id,
-                    "status_id": None,
-                    "price": None,
-                    "order_quantity": None,
-                    "rating": None,
-                }
+            daily_data = {
+                "product_id": product_id,
+                "status_id": None,
+                "price": None,
+                "order_quantity": None,
+                "rating": None,
+            }
 
+            try:
+                # Переходимо на сторінку товару
+                driver.get(product_url)
+
+                # Шукаємо елемент для видаленого товару, і якщо такий є, ставимо статус 4
                 try:
-                    driver.get(product_url)
+                    driver.find_element(By.CSS_SELECTOR, DELETED_WARNING_PANEL_SELECTOR)
+                    daily_data["status_id"] = 4
+                    scraped_data.append(daily_data)
+                    time.sleep(1)
+                    continue
+                except NoSuchElementException:
+                    pass
 
-                    # --- Логіка парсингу даних ---
-                    try:
-                        driver.find_element(
-                            By.CSS_SELECTOR, DELETED_WARNING_PANEL_SELECTOR
+                # Чекаємо 5 секунд на завантаження сторінки, якщо вона не завантажилася, перевіряємо чи сторінка 404
+                try:
+                    wait = WebDriverWait(driver, 5)
+                    status_element = wait.until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, STATUS_SELECTOR)
                         )
-                        daily_data["status_id"] = 4
-                        scraped_data.append(daily_data)
-                        time.sleep(1)
-                        continue
+                    )
+                    # Парсимо статус
+                    status_text = status_element.text
+                    for text_key, status_id in STATUS_MAP.items():
+                        if text_key in status_text:
+                            daily_data["status_id"] = status_id
+                            break
+                except TimeoutException:
+                    try:
+                        driver.find_element(By.CSS_SELECTOR, PAGE_NOT_FOUND_SELECTOR)
+                        daily_data["status_id"] = 0
                     except NoSuchElementException:
                         pass
 
+                # Шукаємо елементи інформації про товар
+                try:
+                    main_info_block = driver.find_element(
+                        By.CSS_SELECTOR, MAIN_INFO_BLOCK_SELECTOR
+                    )
+                    # Парсимо ціну
                     try:
-                        wait = WebDriverWait(driver, 5)
-                        status_element = wait.until(
-                            EC.presence_of_element_located(
-                                (By.CSS_SELECTOR, STATUS_SELECTOR)
-                            )
+                        price_element = main_info_block.find_element(
+                            By.CSS_SELECTOR, PRICE_SELECTOR
                         )
-                        status_text = status_element.text
-                        for text_key, status_id in STATUS_MAP.items():
-                            if text_key in status_text:
-                                daily_data["status_id"] = status_id
-                                break
-                    except TimeoutException:
-                        try:
-                            driver.find_element(
-                                By.CSS_SELECTOR, PAGE_NOT_FOUND_SELECTOR
-                            )
-                            daily_data["status_id"] = 0
-                        except NoSuchElementException:
-                            pass
-
-                    try:
-                        main_info_block = driver.find_element(
-                            By.CSS_SELECTOR, MAIN_INFO_BLOCK_SELECTOR
-                        )
-                        try:
-                            price_element = main_info_block.find_element(
-                                By.CSS_SELECTOR, PRICE_SELECTOR
-                            )
-                            daily_data["price"] = float(
-                                price_element.get_attribute("data-qaprice")
-                            )
-                        except (NoSuchElementException, TypeError, ValueError):
-                            pass
-                        try:
-                            orders_text = main_info_block.find_element(
-                                By.CSS_SELECTOR, ORDER_COUNTER_SELECTOR
-                            ).text
-                            daily_data["order_quantity"] = _extract_number(orders_text)
-                        except NoSuchElementException:
-                            pass
-                    except NoSuchElementException:
-                        pass
-
-                    try:
-                        rating_element = driver.find_element(
-                            By.CSS_SELECTOR, RATING_SELECTOR
-                        )
-                        daily_data["rating"] = float(
-                            rating_element.get_attribute("data-qarating")
+                        daily_data["price"] = float(
+                            price_element.get_attribute("data-qaprice")
                         )
                     except (NoSuchElementException, TypeError, ValueError):
                         pass
 
-                except Exception:
-                    # Ігноруємо помилки на рівні одного URL, щоб не зупиняти весь парсинг
+                    # Парсимо кількість замовлень
+                    try:
+                        orders_text = main_info_block.find_element(
+                            By.CSS_SELECTOR, ORDER_COUNTER_SELECTOR
+                        ).text
+                        daily_data["order_quantity"] = _extract_number(orders_text)
+                    except NoSuchElementException:
+                        pass
+                except NoSuchElementException:
                     pass
 
-                if daily_data.get("status_id") is None:
-                    daily_data["status_id"] = 5
+                # Парсимо рейтинг
+                try:
+                    rating_element = driver.find_element(
+                        By.CSS_SELECTOR, RATING_SELECTOR
+                    )
+                    daily_data["rating"] = float(
+                        rating_element.get_attribute("data-qarating")
+                    )
+                except (NoSuchElementException, TypeError, ValueError):
+                    pass
 
-                scraped_data.append(daily_data)
-                time.sleep(1)
+            except Exception:
+                # Ігноруємо помилки на рівні одного URL, щоб не зупиняти весь парсинг
+                pass
+
+            if daily_data.get("status_id") is None:
+                daily_data["status_id"] = 5
+
+            scraped_data.append(daily_data)
+            time.sleep(1)
 
         return {"status": "success", "data": scraped_data}
 
     except Exception as e:
         return {"status": "failure", "message": f"Критична помилка: {str(e)}"}
+    finally:
+        # Закриваємо браузер
+        if driver:
+            driver.quit()
